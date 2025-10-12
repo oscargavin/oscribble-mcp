@@ -1,0 +1,47 @@
+{
+  "name": "@oscargavin/oscribble-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Oscribble - enables Claude Code integration with your task projects",
+  "type": "module",
+  "main": "./build/index.js",
+  "bin": {
+    "oscribble-mcp": "./build/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x build/index.js",
+    "watch": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "oscribble",
+    "task-manager",
+    "claude",
+    "model-context-protocol",
+    "ai",
+    "productivity"
+  ],
+  "author": {
+    "name": "oscargavin",
+    "email": "oscarfgavin@gmail.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscargavin/oscribble-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oscargavin/oscribble-mcp/issues"
+  },
+  "homepage": "https://github.com/oscargavin/oscribble-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "typescript": "^5.9.3"
+  }
+}
