@@ -29,7 +29,7 @@ import {
 const server = new Server(
   {
     name: "oscribble",
-    version: "1.0.0",
+    version: "1.2.0",
   },
   {
     capabilities: {
@@ -175,6 +175,77 @@ const tools: Tool[] = [
         },
       },
       required: ["project_name", "task_id"],
+    },
+  },
+  {
+    name: "oscribble_update_task",
+    description: "Update task properties (text, priority, effort estimate, deadline, or notes)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project",
+        },
+        task_id: {
+          type: "string",
+          description: "UUID of the task to update",
+        },
+        text: {
+          type: "string",
+          description: "New task text (optional)",
+        },
+        priority: {
+          type: "string",
+          enum: ["critical", "high", "medium", "low", "feature"],
+          description: "New priority level (optional)",
+        },
+        effort_estimate: {
+          type: "string",
+          description: "New effort estimate like '2h', '30m' (optional)",
+        },
+        deadline: {
+          type: "string",
+          description: "New deadline (optional)",
+        },
+        notes: {
+          type: "string",
+          description: "Additional notes (optional, will be appended)",
+        },
+      },
+      required: ["project_name", "task_id"],
+    },
+  },
+  {
+    name: "oscribble_get_unblocked_tasks",
+    description: "Get all tasks that are not blocked and ready to work on",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project",
+        },
+      },
+      required: ["project_name"],
+    },
+  },
+  {
+    name: "oscribble_search_tasks",
+    description: "Search tasks by keyword in text and notes",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project",
+        },
+        query: {
+          type: "string",
+          description: "Search query (case-insensitive)",
+        },
+      },
+      required: ["project_name", "query"],
     },
   },
 ];
@@ -507,6 +578,177 @@ async function handleCompleteTaskWithTiming(projectName: string, taskId: string)
   return `✓ Completed task in ${durationDisplay}: ${task.text.slice(0, 50)}...`;
 }
 
+async function handleUpdateTask(
+  projectName: string,
+  taskId: string,
+  updates: {
+    text?: string;
+    priority?: string;
+    effort_estimate?: string;
+    deadline?: string;
+    notes?: string;
+  }
+): Promise<string> {
+  const projectPath = await getProjectPath(projectName);
+  const notesFile = join(projectPath, "notes.json");
+
+  if (!(await fileExists(notesFile))) {
+    return `Notes file not found for project '${projectName}'.`;
+  }
+
+  const notesData = await loadJson<NotesFile>(notesFile);
+  const tasks = notesData.tasks || [];
+
+  const result = findTaskById(tasks, taskId);
+  if (!result) {
+    return `Task with ID '${taskId}' not found in project '${projectName}'.`;
+  }
+
+  const [task] = result;
+  const changes: string[] = [];
+
+  // Update text
+  if (updates.text !== undefined) {
+    task.text = updates.text;
+    changes.push(`text updated`);
+  }
+
+  // Update metadata fields
+  if (!task.metadata) {
+    task.metadata = {};
+  }
+
+  if (updates.priority !== undefined) {
+    task.metadata.priority = updates.priority as any;
+    changes.push(`priority → ${updates.priority}`);
+  }
+
+  if (updates.effort_estimate !== undefined) {
+    task.metadata.effort_estimate = updates.effort_estimate;
+    changes.push(`effort → ${updates.effort_estimate}`);
+  }
+
+  if (updates.deadline !== undefined) {
+    task.metadata.deadline = updates.deadline;
+    changes.push(`deadline → ${updates.deadline}`);
+  }
+
+  if (updates.notes !== undefined) {
+    // Append to existing notes
+    const existingNotes = task.metadata.notes || [];
+    const notesArray = Array.isArray(existingNotes) ? existingNotes : [existingNotes];
+    task.metadata.notes = [...notesArray, updates.notes];
+    changes.push(`note added`);
+  }
+
+  await atomicWriteJson(notesFile, notesData);
+
+  return `✓ Task updated (${changes.join(", ")}): ${task.text.slice(0, 50)}...`;
+}
+
+async function handleGetUnblockedTasks(projectName: string): Promise<string> {
+  const projectPath = await getProjectPath(projectName);
+  const notesFile = join(projectPath, "notes.json");
+
+  if (!(await fileExists(notesFile))) {
+    return `No tasks found for project '${projectName}'. The notes file doesn't exist yet.`;
+  }
+
+  const notesData = await loadJson<NotesFile>(notesFile);
+  const tasks = notesData.tasks || [];
+
+  // Recursively collect all unchecked tasks
+  function collectUnblockedTasks(taskList: TaskNode[]): TaskNode[] {
+    const unblocked: TaskNode[] = [];
+    for (const task of taskList) {
+      // Skip completed tasks
+      if (task.checked) {
+        continue;
+      }
+
+      // Check if task is blocked
+      const isBlocked = task.metadata?.blocked_by && task.metadata.blocked_by.length > 0;
+
+      if (!isBlocked) {
+        unblocked.push(task);
+      }
+
+      // Recursively check children
+      if (task.children && task.children.length > 0) {
+        unblocked.push(...collectUnblockedTasks(task.children));
+      }
+    }
+    return unblocked;
+  }
+
+  const unblockedTasks = collectUnblockedTasks(tasks);
+
+  if (unblockedTasks.length === 0) {
+    return `No unblocked tasks found in project '${projectName}'.`;
+  }
+
+  let result = `**Unblocked tasks in '${projectName}' (${unblockedTasks.length} ready to work on):**\n\n`;
+  for (const task of unblockedTasks) {
+    result += formatTaskForDisplay(task) + "\n\n";
+  }
+
+  return result;
+}
+
+async function handleSearchTasks(projectName: string, query: string): Promise<string> {
+  const projectPath = await getProjectPath(projectName);
+  const notesFile = join(projectPath, "notes.json");
+
+  if (!(await fileExists(notesFile))) {
+    return `No tasks found for project '${projectName}'. The notes file doesn't exist yet.`;
+  }
+
+  const notesData = await loadJson<NotesFile>(notesFile);
+  const tasks = notesData.tasks || [];
+
+  const queryLower = query.toLowerCase();
+
+  // Recursively search tasks
+  function searchTasksRecursive(taskList: TaskNode[]): TaskNode[] {
+    const matches: TaskNode[] = [];
+    for (const task of taskList) {
+      const textMatch = task.text.toLowerCase().includes(queryLower);
+
+      // Check notes
+      let notesMatch = false;
+      if (task.metadata?.notes) {
+        const notesArray = Array.isArray(task.metadata.notes)
+          ? task.metadata.notes
+          : [task.metadata.notes];
+        notesMatch = notesArray.some(note => note.toLowerCase().includes(queryLower));
+      }
+
+      if (textMatch || notesMatch) {
+        matches.push(task);
+      }
+
+      // Search children
+      if (task.children && task.children.length > 0) {
+        matches.push(...searchTasksRecursive(task.children));
+      }
+    }
+    return matches;
+  }
+
+  const matchingTasks = searchTasksRecursive(tasks);
+
+  if (matchingTasks.length === 0) {
+    return `No tasks found matching '${query}' in project '${projectName}'.`;
+  }
+
+  let result = `**Search results for '${query}' in '${projectName}' (${matchingTasks.length} matches):**\n\n`;
+  for (const task of matchingTasks) {
+    result += formatTaskForDisplay(task) + "\n\n";
+  }
+
+  return result;
+}
+
 // Register handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools };
@@ -556,6 +798,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "oscribble_complete_task_with_timing":
         result = await handleCompleteTaskWithTiming(args.project_name as string, args.task_id as string);
+        break;
+
+      case "oscribble_update_task":
+        result = await handleUpdateTask(
+          args.project_name as string,
+          args.task_id as string,
+          {
+            text: args.text as string | undefined,
+            priority: args.priority as string | undefined,
+            effort_estimate: args.effort_estimate as string | undefined,
+            deadline: args.deadline as string | undefined,
+            notes: args.notes as string | undefined,
+          }
+        );
+        break;
+
+      case "oscribble_get_unblocked_tasks":
+        result = await handleGetUnblockedTasks(args.project_name as string);
+        break;
+
+      case "oscribble_search_tasks":
+        result = await handleSearchTasks(args.project_name as string, args.query as string);
         break;
 
       default:
