@@ -5,7 +5,20 @@
 export interface TaskMetadata {
   priority?: "critical" | "performance" | "feature";
   blocked_by?: string[];
-  notes?: string;
+  depends_on?: string[];
+  related_to?: string[];
+  notes?: string | string[];
+  deadline?: string;
+  effort_estimate?: string;
+  tags?: string[];
+  formatted?: boolean;
+  context_files?: {
+    path: string;
+    wasGrepped?: boolean;
+    matchedKeywords?: string[];
+  }[];
+  start_time?: number;  // Unix timestamp when task started (milliseconds)
+  duration?: number;    // Milliseconds elapsed (presence means completed)
 }
 
 export interface TaskNode {

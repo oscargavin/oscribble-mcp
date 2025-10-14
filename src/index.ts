@@ -141,6 +141,42 @@ const tools: Tool[] = [
       required: ["project_name", "task_text"],
     },
   },
+  {
+    name: "oscribble_begin_task",
+    description: "Begin timing a task - records start timestamp",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project",
+        },
+        task_id: {
+          type: "string",
+          description: "UUID of the task to begin timing",
+        },
+      },
+      required: ["project_name", "task_id"],
+    },
+  },
+  {
+    name: "oscribble_complete_task_with_timing",
+    description: "Complete a task and calculate duration from start time",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project",
+        },
+        task_id: {
+          type: "string",
+          description: "UUID of the task to complete",
+        },
+      },
+      required: ["project_name", "task_id"],
+    },
+  },
 ];
 
 // Tool Handlers
@@ -290,8 +326,43 @@ async function handleGetTaskDetails(projectName: string, taskId: string): Promis
     details += `**Blocked by:** ${metadata.blocked_by.join(", ")}\n`;
   }
 
+  if (metadata.depends_on && metadata.depends_on.length > 0) {
+    details += `**Depends on:** ${metadata.depends_on.join(", ")}\n`;
+  }
+
+  if (metadata.related_to && metadata.related_to.length > 0) {
+    details += `**Related to:** ${metadata.related_to.join(", ")}\n`;
+  }
+
   if (metadata.notes) {
-    details += `**Notes:** ${metadata.notes}\n`;
+    if (Array.isArray(metadata.notes)) {
+      details += `**Notes:**\n${metadata.notes.map(note => `  - ${note}`).join('\n')}\n`;
+    } else {
+      details += `**Notes:** ${metadata.notes}\n`;
+    }
+  }
+
+  if (metadata.deadline) {
+    details += `**Deadline:** ${metadata.deadline}\n`;
+  }
+
+  if (metadata.effort_estimate) {
+    details += `**Effort Estimate:** ${metadata.effort_estimate}\n`;
+  }
+
+  if (metadata.tags && metadata.tags.length > 0) {
+    details += `**Tags:** ${metadata.tags.join(", ")}\n`;
+  }
+
+  if (metadata.context_files && metadata.context_files.length > 0) {
+    details += `\n**Context Files Analyzed (${metadata.context_files.length}):**\n`;
+    for (const file of metadata.context_files) {
+      details += `  - \`${file.path}\``;
+      if (file.wasGrepped && file.matchedKeywords) {
+        details += ` (grep: ${file.matchedKeywords.join(", ")})`;
+      }
+      details += '\n';
+    }
   }
 
   const children = task.children || [];
@@ -329,6 +400,111 @@ async function handleAddRawTask(projectName: string, taskText: string): Promise<
   await fs.appendFile(rawFile, content, "utf-8");
 
   return `✓ Added raw task to project '${projectName}'. It will be formatted next time you open Oscribble.`;
+}
+
+async function handleBeginTask(projectName: string, taskId: string): Promise<string> {
+  const projectPath = await getProjectPath(projectName);
+  const notesFile = join(projectPath, "notes.json");
+
+  if (!(await fileExists(notesFile))) {
+    return `Notes file not found for project '${projectName}'.`;
+  }
+
+  const notesData = await loadJson<NotesFile>(notesFile);
+  const tasks = notesData.tasks || [];
+
+  // Find the task
+  const result = findTaskById(tasks, taskId);
+  if (!result) {
+    return `Task with ID '${taskId}' not found in project '${projectName}'.`;
+  }
+
+  const [task] = result;
+
+  // Set start time (milliseconds timestamp)
+  const startTime = Date.now();
+
+  if (!task.metadata) {
+    task.metadata = {};
+  }
+  task.metadata.start_time = startTime;
+
+  // Save atomically
+  await atomicWriteJson(notesFile, notesData);
+
+  return `✓ Started timing task: ${task.text.slice(0, 50)}... (at ${startTime})`;
+}
+
+async function handleCompleteTaskWithTiming(projectName: string, taskId: string): Promise<string> {
+  const projectPath = await getProjectPath(projectName);
+  const notesFile = join(projectPath, "notes.json");
+  const logFile = join(projectPath, "completion_log.json");
+
+  if (!(await fileExists(notesFile))) {
+    return `Notes file not found for project '${projectName}'.`;
+  }
+
+  const notesData = await loadJson<NotesFile>(notesFile);
+  const tasks = notesData.tasks || [];
+
+  // Find the task
+  const result = findTaskById(tasks, taskId);
+  if (!result) {
+    return `Task with ID '${taskId}' not found in project '${projectName}'.`;
+  }
+
+  const [task] = result;
+
+  if (!task.metadata?.start_time) {
+    return `Error: Task not started (use oscribble_begin_task first)`;
+  }
+
+  const completedAt = Date.now();
+  const duration = completedAt - task.metadata.start_time;
+
+  task.metadata.duration = duration;
+  task.checked = true;
+
+  // Load or create completion log
+  interface CompletionLog {
+    version: string;
+    completions: Array<{
+      task_id: string;
+      text: string;
+      estimated_time?: string;
+      actual_time: number;
+      completed_at: number;
+    }>;
+  }
+
+  let log: CompletionLog = { version: '1.0.0', completions: [] };
+
+  if (await fileExists(logFile)) {
+    log = await loadJson<CompletionLog>(logFile);
+  }
+
+  log.completions.push({
+    task_id: taskId,
+    text: task.text,
+    estimated_time: task.metadata?.effort_estimate,
+    actual_time: duration,
+    completed_at: completedAt
+  });
+
+  // Retention: keep last 100
+  if (log.completions.length > 100) {
+    log.completions = log.completions.slice(-100);
+  }
+
+  await atomicWriteJson(notesFile, notesData);
+  await atomicWriteJson(logFile, log);
+
+  const durationHours = duration / (1000 * 60 * 60);
+  const durationDisplay = durationHours < 1
+    ? `${Math.round(duration / (1000 * 60))}m`
+    : `${durationHours.toFixed(1)}h`;
+
+  return `✓ Completed task in ${durationDisplay}: ${task.text.slice(0, 50)}...`;
 }
 
 // Register handlers
@@ -372,6 +548,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "oscribble_add_raw_task":
         result = await handleAddRawTask(args.project_name as string, args.task_text as string);
+        break;
+
+      case "oscribble_begin_task":
+        result = await handleBeginTask(args.project_name as string, args.task_id as string);
+        break;
+
+      case "oscribble_complete_task_with_timing":
+        result = await handleCompleteTaskWithTiming(args.project_name as string, args.task_id as string);
         break;
 
       default:
