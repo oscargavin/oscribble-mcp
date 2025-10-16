@@ -19,6 +19,10 @@ export interface TaskMetadata {
   }[];
   start_time?: number;  // Unix timestamp when task started (milliseconds)
   duration?: number;    // Milliseconds elapsed (presence means completed)
+  attempts?: Array<{
+    timestamp: number;  // Unix timestamp when attempt failed (milliseconds)
+    note: string;       // Detailed note from Claude Code about what was tried
+  }>;
 }
 
 export interface TaskNode {

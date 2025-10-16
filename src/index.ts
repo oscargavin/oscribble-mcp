@@ -89,7 +89,7 @@ const tools: Tool[] = [
   },
   {
     name: "oscribble_uncomplete_task",
-    description: "Mark a task as incomplete in an Oscribble project",
+    description: "Mark a task as incomplete in an Oscribble project. Optionally log a failed attempt note with details about what was tried.",
     inputSchema: {
       type: "object",
       properties: {
@@ -100,6 +100,10 @@ const tools: Tool[] = [
         task_id: {
           type: "string",
           description: "UUID of the task to uncomplete",
+        },
+        attempt_note: {
+          type: "string",
+          description: "Optional detailed note from Claude Code about the failed attempt. Should include: hypothesis, files changed, what was tried, and what's still broken.",
         },
       },
       required: ["project_name", "task_id"],
@@ -333,7 +337,7 @@ async function handleListTasks(projectName: string, filterStatus: FilterStatus =
   return result;
 }
 
-async function handleCompleteTask(projectName: string, taskId: string, complete: boolean): Promise<string> {
+async function handleCompleteTask(projectName: string, taskId: string, complete: boolean, attemptNote?: string): Promise<string> {
   const projectPath = await getProjectPath(projectName);
   const notesFile = join(projectPath, "notes.json");
 
@@ -355,8 +359,37 @@ async function handleCompleteTask(projectName: string, taskId: string, complete:
   // Update the task
   task.checked = complete;
 
+  // Handle uncompleting with attempt note
+  if (!complete && attemptNote) {
+    if (!task.metadata) {
+      task.metadata = {};
+    }
+    if (!task.metadata.attempts) {
+      task.metadata.attempts = [];
+    }
+
+    // Add new attempt
+    task.metadata.attempts.push({
+      timestamp: Date.now(),
+      note: attemptNote,
+    });
+  }
+
   // Save atomically
   await atomicWriteJson(notesFile, notesData);
+
+  // Return response with hints for failed attempts
+  if (!complete && attemptNote) {
+    const attemptCount = task.metadata?.attempts?.length || 0;
+
+    if (attemptCount === 1) {
+      return `✓ Task uncompleted. Attempt #${attemptCount} logged.`;
+    } else if (attemptCount === 2) {
+      return `✓ Task uncompleted. Attempt #${attemptCount} logged.\n💡 Tip: Consider using context7 MCP to research relevant documentation for this issue.`;
+    } else {
+      return `⚠️ Task uncompleted. Attempt #${attemptCount} logged.\n🚨 Multiple failures detected. Strongly recommend:\n  - Use context7 MCP to research relevant documentation\n  - Review all previous attempts via oscribble_get_task_details before trying again\n  - Consider a fundamentally different approach`;
+    }
+  }
 
   const status = complete ? "completed" : "uncompleted";
   return `✓ Task '${task.text}' ${status} successfully in project '${projectName}'.`;
@@ -434,6 +467,17 @@ async function handleGetTaskDetails(projectName: string, taskId: string): Promis
       }
       details += '\n';
     }
+  }
+
+  if (metadata.attempts && metadata.attempts.length > 0) {
+    details += `\n⚠️ **Failed Attempts (${metadata.attempts.length}):**\n`;
+    for (let i = 0; i < metadata.attempts.length; i++) {
+      const attempt = metadata.attempts[i];
+      const date = new Date(attempt.timestamp);
+      details += `\n**Attempt #${i + 1}** (${date.toLocaleString()}):\n`;
+      details += `${attempt.note}\n`;
+    }
+    details += '\n';
   }
 
   const children = task.children || [];
@@ -781,7 +825,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case "oscribble_uncomplete_task":
-        result = await handleCompleteTask(args.project_name as string, args.task_id as string, false);
+        result = await handleCompleteTask(
+          args.project_name as string,
+          args.task_id as string,
+          false,
+          args.attempt_note as string | undefined
+        );
         break;
 
       case "oscribble_get_task_details":
